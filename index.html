@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>Mecha-Blade: Horizon</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap');
+
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Orbitron', sans-serif; user-select: none; }
+        
+        /* UI Layer */
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+        
+        /* Main Menu */
+        #main-menu { position: absolute; width: 100%; height: 100%; background: radial-gradient(circle, #001a1a, #000); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 100; pointer-events: auto; }
+        h1 { color: #00ffff; text-shadow: 0 0 20px #00ffff; font-size: 3rem; margin-bottom: 10px; }
+        .menu-btn { background: rgba(0, 255, 255, 0.1); border: 2px solid #00ffff; color: #00ffff; padding: 15px 40px; margin: 10px; font-family: 'Orbitron', sans-serif; font-size: 1.2rem; cursor: pointer; transition: 0.3s; width: 250px; text-transform: uppercase; }
+        .menu-btn:hover { background: #00ffff; color: #000; box-shadow: 0 0 30px #00ffff; }
+        .menu-btn:disabled { opacity: 0.3; cursor: not-allowed; border-color: #555; color: #555; }
+
+        /* HUD */
+        #hud { display: none; }
+        .panel { position: absolute; background: rgba(0, 20, 30, 0.8); border-left: 3px solid #00ffff; padding: 15px; color: #fff; text-shadow: 1px 1px 0 #000; }
+        #quest-panel { top: 20px; right: 20px; text-align: right; }
+        #stats-panel { bottom: 20px; left: 20px; }
+        #clock-panel { top: 20px; left: 50%; transform: translateX(-50%); border: none; border-bottom: 3px solid #00ffff; }
+        
+        /* Bars */
+        .bar-container { width: 200px; height: 10px; background: #333; margin-top: 5px; }
+        .hp-bar { width: 100%; height: 100%; background: linear-gradient(90deg, #ff3333, #ff0000); transition: width 0.2s; }
+        
+        /* Tutorial Overlay */
+        #tutorial { position: absolute; bottom: 100px; width: 100%; text-align: center; color: rgba(255,255,255,0.7); display: none; }
+    </style>
+</head>
+<body>
+
+    <div id="main-menu">
+        <h1>MECHA-BLADE: HORIZON</h1>
+        <p style="color: #666; margin-bottom: 40px;">VERSION 0.9.2 // PROTOCOL: OPEN_WORLD</p>
+        <button class="menu-btn" onclick="GameApp.startNewGame()">Neues Spiel</button>
+        <button class="menu-btn" id="btn-continue" onclick="GameApp.loadGame()">Fortsetzen</button>
+        <button class="menu-btn" onclick="alert('Einstellungen: Grafik [ULTRA], Sound [100%]')">Einstellungen</button>
+    </div>
+
+    <div id="ui-layer">
+        <div id="hud">
+            <div id="clock-panel" class="panel">TAG 1 | <span id="time-display">08:00</span></div>
+            
+            <div id="quest-panel" class="panel">
+                <h3 style="margin:0; color:#00ffff;">MISSION LOG</h3>
+                <p id="quest-desc" style="font-size: 0.9em;">Initialisiere Systeme...</p>
+                <small id="quest-status" style="color: yellow;">[AKTIV]</small>
+            </div>
+
+            <div id="stats-panel" class="panel">
+                <div style="font-weight: bold; font-size: 1.2em;">MECHA UNIT 01</div>
+                <div class="bar-container"><div id="hp-bar" class="hp-bar"></div></div>
+                <p style="margin: 5px 0 0 0; font-size: 0.8em; color:#aaa;">POS: <span id="coords">0, 0</span></p>
+            </div>
+
+            <div id="tutorial">
+                [W,A,S,D] Bewegen | [SPACE] Sprung | [L-KLICK] Angriff | [ESC] Speichern & Menü
+            </div>
+        </div>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { SimplexNoise } from 'three/addons/math/SimplexNoise.js';
+
+        // --- GLOBAL CONFIG ---
+        const CONFIG = {
+            worldSize: 600,     // Gesamtgröße
+            walkableRadius: 200, // Bis hierhin flach, danach steil
+            maxHeight: 80,      // Höhe der Berge
+            dayDuration: 120,   // Sekunden für einen vollen Tag
+        };
+
+        // --- SAVE SYSTEM ---
+        class SaveSystem {
+            static save(data) {
+                localStorage.setItem('mecha_save', JSON.stringify(data));
+                console.log("Spiel gespeichert.");
+            }
+            static load() {
+                const data = localStorage.getItem('mecha_save');
+                return data ? JSON.parse(data) : null;
+            }
+            static hasSave() {
+                return localStorage.getItem('mecha_save') !== null;
+            }
+        }
+
+        // --- WORLD GENERATION (The Bowl) ---
+        class World {
+            constructor(scene) {
+                this.scene = scene;
+                this.noise = new SimplexNoise();
+                this.ground = null;
+                this.interactables = [];
+            }
+
+            generate() {
+                // Boden-Geometrie mit hoher Auflösung für Details
+                const geometry = new THREE.PlaneGeometry(CONFIG.worldSize, CONFIG.worldSize, 128, 128);
+                const pos = geometry.attributes.position;
+                
+                // Colors für Vertex Coloring (Schnee oben, Gras unten)
+                const colors = [];
+                const colorGrass = new THREE.Color(0x113311);
+                const colorRock = new THREE.Color(0x444444);
+                const colorSnow = new THREE.Color(0xffffff);
+
+                for (let i = 0; i < pos.count; i++) {
+                    const x = pos.getX(i);
+                    const z = pos.getY(i); // Plane ist gedreht, Y ist Z
+                    
+                    // 1. Base Noise (Hügel)
+                    let y = this.noise.noise(x * 0.01, z * 0.01) * 5; 
+                    y += this.noise.noise(x * 0.05, z * 0.05) * 1;
+
+                    // 2. Bowl Factor (Exponentieller Anstieg zum Rand)
+                    const dist = Math.sqrt(x*x + z*z);
+                    const edgeFactor = Math.max(0, (dist - CONFIG.walkableRadius) / (CONFIG.worldSize/2 - CONFIG.walkableRadius));
+                    const mountainRise = Math.pow(edgeFactor, 3) * CONFIG.maxHeight;
+
+                    const finalH = y + mountainRise;
+                    pos.setZ(i, finalH);
+
+                    // 3. Coloring Logic
+                    const mixColor = new THREE.Color();
+                    if (finalH > 40) mixColor.copy(colorSnow);
+                    else if (finalH > 15) mixColor.copy(colorRock);
+                    else mixColor.copy(colorGrass);
+                    
+                    // Add slight random variation
+                    mixColor.multiplyScalar(0.8 + Math.random()*0.4);
+                    colors.push(mixColor.r, mixColor.g, mixColor.b);
+                }
+
+                geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+                geometry.computeVertexNormals();
+
+                const material = new THREE.MeshStandardMaterial({ 
+                    vertexColors: true, 
+                    roughness: 0.9,
+                    flatShading: true // Low-Poly Look
+                });
+
+                this.ground = new THREE.Mesh(geometry, material);
+                this.ground.rotation.x = -Math.PI / 2;
+                this.ground.receiveShadow = true;
+                this.scene.add(this.ground);
+
+                this.addDecorations();
+            }
+
+            getHeightAt(x, z) {
+                // Raycaster wäre genauer, aber Noise-Approximation ist schneller
+                // Hier vereinfacht: Wir nutzen die Noise-Funktion erneut
+                let y = this.noise.noise(x * 0.01, z * 0.01) * 5;
+                y += this.noise.noise(x * 0.05, z * 0.05) * 1;
+                const dist = Math.sqrt(x*x + z*z);
+                const edgeFactor = Math.max(0, (dist - CONFIG.walkableRadius) / (CONFIG.worldSize/2 - CONFIG.walkableRadius));
+                const mountainRise = Math.pow(edgeFactor, 3) * CONFIG.maxHeight;
+                return y + mountainRise;
+            }
+
+            addDecorations() {
+                // Bäume instanziiert für Performance
+                const treeGeo = new THREE.ConeGeometry(1, 4, 8);
+                const treeMat = new THREE.MeshStandardMaterial({ color: 0x0a2a0a });
+                const trees = new THREE.InstancedMesh(treeGeo, treeMat, 500);
+                
+                const dummy = new THREE.Object3D();
+                let count = 0;
+                for(let i=0; i<1000; i++) {
+                    const x = (Math.random() - 0.5) * CONFIG.worldSize * 0.8;
+                    const z = (Math.random() - 0.5) * CONFIG.worldSize * 0.8;
+                    const y = this.getHeightAt(x, z);
+
+                    // Keine Bäume auf Steilwänden oder im Wasser
+                    if(y > 2 && y < 30) {
+                        dummy.position.set(x, y + 2, z);
+                        dummy.scale.setScalar(1 + Math.random());
+                        dummy.updateMatrix();
+                        trees.setMatrixAt(count++, dummy.matrix);
+                    }
+                    if(count >= 500) break;
+                }
+                trees.receiveShadow = true;
+                trees.castShadow = true;
+                this.scene.add(trees);
+
+                // Ziel-Truhe (Quest Item)
+                const chest = new THREE.Mesh(new THREE.BoxGeometry(2,2,2), new THREE.MeshStandardMaterial({color:0xffd700, metalness:1, roughness:0.2}));
+                const chestX = 80, chestZ = -80;
+                chest.position.set(chestX, this.getHeightAt(chestX, chestZ)+1, chestZ);
+                chest.userData = { type: 'chest', id: 'relic' };
+                this.scene.add(chest);
+                this.interactables.push(chest);
+
+                // Leuchtfeuer bei der Truhe
+                const light = new THREE.PointLight(0xffaa00, 2, 20);
+                light.position.set(0, 2, 0);
+                chest.add(light);
+            }
+        }
+
+        // --- ATMOSPHERE & TIME ---
+        class Atmosphere {
+            constructor(scene) {
+                this.scene = scene;
+                this.time = 0; // 0 bis 1 (0 = Mittag, 0.5 = Mitternacht)
+                this.sunLight = new THREE.DirectionalLight(0xffffff, 1.5);
+                this.sunLight.castShadow = true;
+                this.sunLight.shadow.mapSize.width = 2048;
+                this.sunLight.shadow.mapSize.height = 2048;
+                this.scene.add(this.sunLight);
+                
+                this.ambient = new THREE.AmbientLight(0x404040);
+                this.scene.add(this.ambient);
+
+                this.scene.fog = new THREE.FogExp2(0xffffff, 0.015);
+            }
+
+            update(dt) {
+                this.time += dt / CONFIG.dayDuration;
+                if(this.time > 1) this.time = 0;
+
+                // Sonnen Position
+                const angle = this.time * Math.PI * 2;
+                const r = 100;
+                this.sunLight.position.set(Math.sin(angle) * r, Math.cos(angle) * r, 50);
+
+                // Himmelsfarbe berechnen
+                const isDay = Math.cos(angle) > 0;
+                const sunset = 1 - Math.abs(Math.cos(angle)); // 1 am Horizont
+
+                let skyColor;
+                if(isDay) {
+                    skyColor = new THREE.Color(0x87CEEB).lerp(new THREE.Color(0xffaa00), Math.pow(sunset, 3));
+                    this.sunLight.intensity = 1.5 * (1 - sunset*0.5);
+                } else {
+                    skyColor = new THREE.Color(0x000011).lerp(new THREE.Color(0x050522), 0.5);
+                    this.sunLight.intensity = 0.1;
+                }
+
+                this.scene.background = skyColor;
+                this.scene.fog.color.copy(skyColor);
+                this.ambient.intensity = isDay ? 0.6 : 0.2;
+
+                return this.time;
+            }
+            
+            getTimeString() {
+                const totalMinutes = Math.floor(this.time * 24 * 60);
+                const h = Math.floor(totalMinutes / 60);
+                const m = totalMinutes % 60;
+                return `${h.toString().padStart(2,'0')}:${m.toString().padStart(2,'0')}`;
+            }
+        }
+
+        // --- PLAYER CONTROLLER ---
+        class Player {
+            constructor(scene, world) {
+                this.mesh = new THREE.Group();
+                
+                // Visuals
+                const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.5, 1.8), new THREE.MeshStandardMaterial({color: 0x888888}));
+                body.position.y = 0.9;
+                body.castShadow = true;
+                this.mesh.add(body);
+
+                // Mechanisches Schwert
+                const sword = new THREE.Mesh(new THREE.BoxGeometry(0.1, 1.4, 0.2), new THREE.MeshStandardMaterial({color: 0xffffff, emissive: 0x00ffff, emissiveIntensity: 2}));
+                sword.position.set(0.6, 1.2, 0.4);
+                sword.rotation.x = Math.PI / 2;
+                this.mesh.add(sword);
+                this.swordMesh = sword;
+
+                scene.add(this.mesh);
+                this.world = world;
+                this.hp = 100;
+                this.velocity = new THREE.Vector3();
+                this.isGrounded = false;
+            }
+
+            update(keys, dt, camera) {
+                // Rotation
+                if(keys['a']) this.mesh.rotation.y += 3 * dt;
+                if(keys['d']) this.mesh.rotation.y -= 3 * dt;
+
+                // Bewegung relativ zur Blickrichtung
+                const fwd = new THREE.Vector3(0,0,-1).applyQuaternion(this.mesh.quaternion);
+                const speed = keys['shift'] ? 10 : 5;
+                
+                if(keys['w']) this.mesh.position.add(fwd.clone().multiplyScalar(speed * dt));
+                if(keys['s']) this.mesh.position.add(fwd.clone().multiplyScalar(-speed * 0.6 * dt));
+
+                // Physik (einfach)
+                const groundY = this.world.getHeightAt(this.mesh.position.x, this.mesh.position.z);
+                
+                // Gravitation
+                this.velocity.y -= 20 * dt;
+                this.mesh.position.y += this.velocity.y * dt;
+
+                // Bodenkollision
+                if (this.mesh.position.y < groundY) {
+                    this.mesh.position.y = groundY;
+                    this.velocity.y = 0;
+                    this.isGrounded = true;
+                } else {
+                    this.isGrounded = false;
+                }
+
+                // Springen
+                if(keys[' '] && this.isGrounded) {
+                    this.velocity.y = 8;
+                    this.isGrounded = false;
+                }
+                
+                // Angriff Animation
+                if(keys['mouse']) {
+                    this.swordMesh.rotation.x = Math.sin(Date.now() * 0.02) * 2;
+                } else {
+                    this.swordMesh.rotation.x = THREE.MathUtils.lerp(this.swordMesh.rotation.x, Math.PI/2, 10*dt);
+                }
+            }
+        }
+
+        // --- MAIN GAME APP ---
+        const App = {
+            scene: null, camera: null, renderer: null,
+            world: null, atmosphere: null, player: null,
+            isRunning: false,
+            keys: {},
+            questState: { active: true, target: 'relic', desc: "Finde das antike Relikt in den östlichen Bergen." },
+
+            init() {
+                // Scene
+                this.scene = new THREE.Scene();
+                this.camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 500);
+                this.renderer = new THREE.WebGLRenderer({antialias: true});
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.renderer.shadowMap.enabled = true;
+                this.renderer.shadowMap.type = THREE.PCFSoftShadowMap; // Softer shadows
+                document.body.appendChild(this.renderer.domElement);
+
+                // Systems
+                this.world = new World(this.scene);
+                this.atmosphere = new Atmosphere(this.scene);
+                
+                // Inputs
+                window.addEventListener('keydown', e => { 
+                    this.keys[e.key.toLowerCase()] = true; 
+                    if(e.key === "Escape") this.togglePause();
+                });
+                window.addEventListener('keyup', e => this.keys[e.key.toLowerCase()] = false);
+                window.addEventListener('mousedown', () => this.keys['mouse'] = true);
+                window.addEventListener('mouseup', () => this.keys['mouse'] = false);
+                window.addEventListener('resize', () => this.onResize());
+
+                // Check Savegame button
+                if(SaveSystem.hasSave()) {
+                    document.getElementById('btn-continue').style.display = 'inline-block';
+                    document.getElementById('btn-continue').disabled = false;
+                }
+            },
+
+            startNewGame() {
+                this.resetGame();
+                this.world.generate();
+                this.player = new Player(this.scene, this.world);
+                this.startGameLoop();
+            },
+
+            loadGame() {
+                const data = SaveSystem.load();
+                if(!data) return;
+
+                this.resetGame();
+                this.world.generate();
+                this.player = new Player(this.scene, this.world);
+                
+                // Restore State
+                this.player.mesh.position.fromArray(data.pos);
+                this.player.mesh.rotation.fromArray(data.rot);
+                this.player.hp = data.hp;
+                this.atmosphere.time = data.time;
+                this.questState = data.quest;
+                
+                this.startGameLoop();
+            },
+
+            resetGame() {
+                // Cleanup Scene objects if needed (simple version: remove all meshes)
+                while(this.scene.children.length > 0){ 
+                    this.scene.remove(this.scene.children[0]); 
+                }
+                // Re-add essentials handled by classes
+                this.world = new World(this.scene); // Reset world
+                this.atmosphere = new Atmosphere(this.scene); // Reset lights
+            },
+
+            startGameLoop() {
+                document.getElementById('main-menu').style.display = 'none';
+                document.getElementById('hud').style.display = 'block';
+                document.getElementById('tutorial').style.display = 'block';
+                setTimeout(() => document.getElementById('tutorial').style.display = 'none', 8000);
+                
+                this.isRunning = true;
+                this.updateUI();
+                this.animate();
+            },
+
+            togglePause() {
+                if(!this.isRunning) return; // Nur wenn Spiel läuft
+                
+                // Save & Quit to Menu
+                const saveData = {
+                    pos: this.player.mesh.position.toArray(),
+                    rot: this.player.mesh.rotation.toArray(),
+                    hp: this.player.hp,
+                    time: this.atmosphere.time,
+                    quest: this.questState
+                };
+                SaveSystem.save(saveData);
+                
+                this.isRunning = false;
+                document.getElementById('hud').style.display = 'none';
+                document.getElementById('main-menu').style.display = 'flex';
+                document.getElementById('btn-continue').style.display = 'inline-block';
+                document.getElementById('btn-continue').disabled = false;
+            },
+
+            updateUI() {
+                document.getElementById('time-display').innerText = this.atmosphere.getTimeString();
+                document.getElementById('coords').innerText = `${Math.round(this.player.mesh.position.x)}, ${Math.round(this.player.mesh.position.z)}`;
+                document.getElementById('hp-bar').style.width = this.player.hp + '%';
+                
+                const qEl = document.getElementById('quest-status');
+                const qDesc = document.getElementById('quest-desc');
+                qDesc.innerText = this.questState.desc;
+                if(this.questState.active) {
+                    qEl.innerText = "[AKTIV]";
+                    qEl.style.color = "yellow";
+                } else {
+                    qEl.innerText = "[ABGESCHLOSSEN]";
+                    qEl.style.color = "#00ff00";
+                }
+            },
+
+            checkQuest() {
+                if(!this.questState.active) return;
+                
+                // Simpler Distance Check zum Ziel
+                const target = this.world.interactables.find(obj => obj.userData.id === this.questState.target);
+                if(target) {
+                    const dist = this.player.mesh.position.distanceTo(target.position);
+                    if(dist < 5) {
+                        this.questState.active = false;
+                        this.questState.desc = "Relikt gefunden! Kehre zurück (Nicht implementiert).";
+                        this.scene.remove(target); // Item einsammeln
+                        // Partikel Effekt hier wäre toll
+                        alert("QUEST ABGESCHLOSSEN: Relikt gefunden!");
+                    }
+                }
+            },
+
+            animate() {
+                if(!this.isRunning) return;
+                requestAnimationFrame(() => this.animate());
+
+                const dt = 0.016; // Fixed step simulation
+
+                this.atmosphere.update(dt);
+                this.player.update(this.keys, dt, this.camera);
+                this.checkQuest();
+
+                // Kamera Logik (Third Person Chase)
+                const idealOffset = new THREE.Vector3(0, 4, 8);
+                idealOffset.applyQuaternion(this.player.mesh.quaternion);
+                const idealLookat = new THREE.Vector3(0, 2, 0);
+                idealLookat.applyQuaternion(this.player.mesh.quaternion);
+                
+                const currentPos = new THREE.Vector3().copy(this.player.mesh.position).add(idealOffset);
+                const currentLook = new THREE.Vector3().copy(this.player.mesh.position).add(idealLookat);
+                
+                this.camera.position.lerp(currentPos, 0.1);
+                this.camera.lookAt(currentLook);
+
+                // UI Update alle paar Frames sparen, hier einfach jedes Frame
+                this.updateUI();
+
+                this.renderer.render(this.scene, this.camera);
+            },
+
+            onResize() {
+                this.camera.aspect = window.innerWidth / window.innerHeight;
+                this.camera.updateProjectionMatrix();
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+            }
+        };
+
+        // Expose to window for HTML buttons
+        window.GameApp = App;
+        App.init();
+
+    </script>
+</body>
+</html>
